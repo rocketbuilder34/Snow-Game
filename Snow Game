@@ -1,0 +1,315 @@
+<!-- Snow vs. Ambition — stable + clean overlay -->
+<div id="snow-runner" style="max-width:860px;margin:2rem auto;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <canvas id="sr-canvas" width="860" height="260" style="width:100%;background:#0f1014;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.25);display:block"></canvas>
+
+  <div id="sr-hud" style="display:flex;justify-content:space-between;align-items:center;margin:.5rem 0;color:#cbd5e1;font-size:14px;">
+    <div>Score: <span id="sr-score">0</span></div>
+    <div>Best: <span id="sr-best">0</span></div>
+  </div>
+</div>
+
+<script type="module">
+const boot = () => {
+  // ---------- THEME & TEXT ----------
+  const THEME = {
+    bg: "#0f1014", ground: "#262835", grid: "rgba(255,255,255,.06)",
+    snowBody: "#f2f4f8", snowHead: "#e9ecf2", rose: "#d1143a",
+    accent: "#ffd166", moneyFill: "#14c38e", powerFill: "#8ab4f8", text: "#e8eaed"
+  };
+  const TEXT = {
+    title: "Snow vs. Ambition",
+    sub:   "Avoid 💰 (money) and 🕊️ (power). Space/↑/Tap to jump. P to pause.",
+    choose: "Choose Difficulty",
+    start: "Start",
+    pause: "Paused — press P to resume",
+    hitMoney: "Snow succumbed to money: ambition without empathy becomes tyranny.",
+    hitPower: "Snow reached for power: empathy abandoned, humanity lost.",
+    replay: "Replay"
+  };
+
+  // ---------- DIFFICULTY ----------
+  const DIFFS = {
+    Easy:   { SPEED: 205, MIN_GAP: 1000, GAP_JITTER: 520, BIRD_CHANCE: 0.24, MOVE_BIRDS: false, MAX_SIMUL: 1, HITBOX_PAD: 6 },
+    Medium: { SPEED: 260, MIN_GAP: 820,  GAP_JITTER: 520, BIRD_CHANCE: 0.42, MOVE_BIRDS: true,  MAX_SIMUL: 2, HITBOX_PAD: 4 },
+    Hard:   { SPEED: 305, MIN_GAP: 720,  GAP_JITTER: 460, BIRD_CHANCE: 0.55, MOVE_BIRDS: true,  MAX_SIMUL: 2, HITBOX_PAD: 2 },
+  };
+  let DIFF_NAME = "Medium";
+  let DIFF = DIFFS[DIFF_NAME];
+
+  // ---------- CANVAS (Hi-DPI crisp) ----------
+  const canvas = document.getElementById("sr-canvas");
+  const ctx = canvas.getContext("2d");
+  const BASE_W = canvas.width, BASE_H = canvas.height;
+  const DPR = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width  = BASE_W * DPR;
+  canvas.height = BASE_H * DPR;
+  canvas.style.width = "100%";
+  ctx.scale(DPR, DPR);
+
+  // ---------- HUD ----------
+  const scoreEl = document.getElementById("sr-score");
+  const bestEl  = document.getElementById("sr-best");
+  let best = Number(localStorage.getItem("sr-best") || 0);
+  bestEl.textContent = best;
+
+  // ---------- WORLD / PLAYER ----------
+  const GROUND_Y = BASE_H - 40;
+  const GRAVITY = 1400;
+  const JUMP_V = -520;
+
+  const snow = { x: 64, y: GROUND_Y - 52, w: 34, h: 52, vy: 0, onGround: true };
+
+  // state
+  let running = false, paused = false, waitingStart = true, gameOver = false;
+  let last = performance.now(), t = 0, score = 0, nextSpawn = 900, hitType = "money";
+  const OBJS = []; // {x,y,w,h,type,vy?}
+  let overlayZones = {}, homeZones = {};
+
+  // ---------- UTILS ----------
+  const rand = (a,b)=> a + Math.random()*(b-a);
+  const rr = (x,y,w,h,r=10)=>{ // filled rounded rect
+    if (w<2*r) r=w/2; if (h<2*r) r=h/2;
+    ctx.beginPath();
+    ctx.moveTo(x+r,y); ctx.arcTo(x+w,y, x+w,y+h, r);
+    ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath(); ctx.fill();
+  };
+  function centerText(msg, y, size=18, color="#fff") {
+    ctx.fillStyle = color; ctx.font = `${size}px system-ui,Arial`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(msg, BASE_W/2, y);
+  }
+  function drawButton(x,y,w,h,text){
+    ctx.fillStyle = THEME.accent; rr(x,y,w,h,12);
+    ctx.fillStyle = "#222"; ctx.font = "16px system-ui,Arial"; ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText(text, x + w/2, y + h/2);
+  }
+
+  // ---------- DRAW WORLD ----------
+  function drawBg(){
+    ctx.fillStyle = THEME.bg; ctx.fillRect(0,0,BASE_W,BASE_H);
+    ctx.strokeStyle = THEME.grid; ctx.lineWidth = 1;
+    for (let x=0; x<BASE_W; x+=24){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,BASE_H); ctx.stroke(); }
+    for (let y=0; y<BASE_H; y+=24){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(BASE_W,y); ctx.stroke(); }
+    ctx.fillStyle = THEME.ground; ctx.fillRect(0,GROUND_Y,BASE_W,BASE_H-GROUND_Y);
+  }
+  function drawSnow(){
+    ctx.fillStyle = THEME.snowBody; ctx.fillRect(snow.x, snow.y+8, snow.w, snow.h-8);
+    ctx.fillStyle = THEME.snowHead; ctx.beginPath(); ctx.arc(snow.x+snow.w/2, snow.y+6, 10, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = THEME.rose; ctx.beginPath(); ctx.arc(snow.x+snow.w-6, snow.y+22, 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#222"; ctx.fillRect(snow.x+snow.w/2-2, snow.y+18, 4, 16);
+  }
+  function drawCenteredEmoji(glyph, x, y, w, h, color="#000"){
+    ctx.font = "18px system-ui,Apple Color Emoji,Segoe UI Emoji,Arial";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = color;
+    ctx.fillText(glyph, x + w/2, y + h/2 + 1);
+  }
+  function drawObj(o){
+    if (o.type === "money"){
+      ctx.fillStyle = THEME.moneyFill; rr(o.x,o.y,o.w,o.h,8);
+      drawCenteredEmoji("💰", o.x, o.y, o.w, o.h, "#053526");
+    } else {
+      ctx.fillStyle = THEME.powerFill; rr(o.x,o.y,o.w,o.h,10);
+      drawCenteredEmoji("🕊️", o.x, o.y, o.w, o.h, "#0b2047");
+    }
+  }
+
+  // ---------- HOME / OVERLAY ----------
+  function drawHome(){
+    drawBg();
+    centerText(TEXT.title, BASE_H*0.30, 24, THEME.text);
+    centerText(TEXT.sub,   BASE_H*0.30 + 28, 13, "#cbd5e1");
+    centerText(TEXT.choose,BASE_H*0.50, 16, THEME.accent);
+
+    const names = ["Easy","Medium","Hard"];
+    const bw=110,bh=38,g=16,totalW=bw*3+g*2, sx=(BASE_W-totalW)/2, by=BASE_H*0.58;
+    homeZones = {};
+    names.forEach((n,i)=>{
+      const x = sx + i*(bw+g);
+      ctx.fillStyle = DIFF_NAME===n ? "rgba(255,209,102,.28)" : "rgba(255,255,255,.10)";
+      rr(x, by-12, bw, bh+24, 12);
+      ctx.fillStyle="#e8eaed"; ctx.font="15px system-ui"; ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.fillText(n, x+bw/2, by+2);
+      drawButton(x, by+18, bw, 36, DIFF_NAME===n ? "Selected" : "Select");
+      homeZones[n] = {x, y:by+18, w:bw, h:36};
+    });
+
+    const sx2=(BASE_W-170)/2, sy2=by+78;
+    drawButton(sx2, sy2, 170, 44, TEXT.start);
+    homeZones.start = {x:sx2, y:sy2, w:170, h:44};
+  }
+
+  function drawOverlay(){
+    // Clear frame first to avoid stacking opacity
+    drawBg();
+
+    // Dim once
+    ctx.fillStyle = "rgba(0,0,0,.5)";
+    ctx.fillRect(0,0,BASE_W,BASE_H);
+
+    const msg = (hitType==="money") ? TEXT.hitMoney : TEXT.hitPower;
+    centerText(msg, BASE_H*0.40, 16, THEME.text);
+
+    centerText(TEXT.choose + ` (current: ${DIFF_NAME})`, BASE_H*0.52, 15, THEME.accent);
+
+    const names=["Easy","Medium","Hard"];
+    const bw=100,bh=34,g=16,totalW=bw*3+g*2,sx=(BASE_W-totalW)/2,by=BASE_H*0.58;
+    overlayZones = {};
+
+    names.forEach((n,i)=>{
+      const x=sx+i*(bw+g);
+      if (n === DIFF_NAME) {  // highlight selected
+        ctx.fillStyle = "rgba(255,209,102,.25)";
+        rr(x-6, by-6, bw+12, bh+12, 12);
+      }
+      drawButton(x,by,bw,bh, n === DIFF_NAME ? "Selected" : "Select");
+      overlayZones[n] = {x, y:by, w:bw, h:bh};
+    });
+
+    const bx=(BASE_W-140)/2, by2=by+bh+18;
+    drawButton(bx, by2, 140, 40, TEXT.replay);
+    overlayZones.replay = {x:bx, y:by2, w:140, h:40};
+  }
+
+  // ---------- SPAWNING ----------
+  let lastType = null;
+  function canSpawn(){
+    if (OBJS.length >= DIFF.MAX_SIMUL) return false;
+    if (OBJS.length){
+      const last = OBJS[OBJS.length-1];
+      if (BASE_W - last.x < DIFF.MIN_GAP*0.6) return false;
+    }
+    return true;
+  }
+  function spawn(){
+    if (!canSpawn()) { nextSpawn = 120; return; }
+    let wantBird = Math.random() < DIFF.BIRD_CHANCE;
+    if (DIFF_NAME==="Easy") wantBird = false;
+    let type = wantBird ? "power" : "money";
+    if (lastType==="power" && wantBird && Math.random()<0.6) type="money";
+    const obj = (type==="money")
+      ? {type, x: BASE_W+14, y: GROUND_Y-24, w: 32, h: 24}
+      : {type, x: BASE_W+14, y: rand(GROUND_Y-118, GROUND_Y-72), w: 40, h: 22, vy: DIFF.MOVE_BIRDS ? (Math.random()<.5?26:-26) : 0};
+    OBJS.push(obj); lastType = type;
+    nextSpawn = rand(DIFF.MIN_GAP, DIFF.MIN_GAP + DIFF.GAP_JITTER);
+  }
+
+  // ---------- COLLISION (forgiving) ----------
+  function hit(a,b,pad){
+    const ax=a.x+pad, ay=a.y+pad, aw=a.w-2*pad, ah=a.h-2*pad;
+    const bx=b.x+pad, by=b.y+pad, bw=b.w-2*pad, bh=b.h-2*pad;
+    return !(ax+aw<bx || ax>bx+bw || ay+ah<by || ay>by+bh);
+  }
+
+  // ---------- UPDATE & DRAW ----------
+  function update(dt){
+    t += dt*1000;
+    snow.vy += GRAVITY*dt;
+    snow.y  += snow.vy*dt;
+    if (snow.y + snow.h >= GROUND_Y) { snow.y = GROUND_Y - snow.h; snow.vy = 0; snow.onGround = true; }
+
+    nextSpawn -= dt*1000; if (nextSpawn<=0) spawn();
+
+    for (let i=OBJS.length-1; i>=0; i--){
+      const o = OBJS[i];
+      o.x -= DIFF.SPEED * dt;
+      if (o.type==="power" && DIFF.MOVE_BIRDS){ o.y += o.vy*dt; if (o.y < GROUND_Y-140 || o.y > GROUND_Y-60) o.vy *= -1; }
+      if (o.x + o.w < -20) { OBJS.splice(i,1); continue; }
+      if (!gameOver && hit(snow,o,DIFF.HITBOX_PAD)){ hitType=o.type; endGame(); }
+    }
+
+    score += Math.floor(50*dt);
+    scoreEl.textContent = score;
+    if (score > best){ best = score; bestEl.textContent = best; }
+  }
+
+  function render(){
+    drawBg(); OBJS.forEach(drawObj); drawSnow();
+    if (waitingStart) drawHome();
+    if (gameOver) drawOverlay();
+    if (paused && !gameOver) centerText(TEXT.pause, BASE_H*0.36, 16, "#fff");
+  }
+
+  function loop(){
+    if (!running) return;
+    const now = performance.now(); let dt = (now - last)/1000; last = now;
+    if (paused) { render(); return; }
+    dt = Math.min(dt, 1/30);
+    update(dt); render();
+    if (!gameOver) requestAnimationFrame(loop);
+  }
+
+  // ---------- FLOW ----------
+  function setDifficulty(name){
+    DIFF_NAME = name; DIFF = DIFFS[name];
+  }
+  function startGame(){
+    waitingStart = false; gameOver = false; paused = false; running = true;
+    OBJS.length = 0; score = 0; nextSpawn = 700; lastType = null;
+    snow.y = GROUND_Y - snow.h; snow.vy = 0; snow.onGround = true;
+    last = performance.now(); loop();
+  }
+  function endGame(){
+    gameOver = true; running = true;
+    localStorage.setItem("sr-best", String(best));
+    render(); // one clean render (no stack)
+  }
+  function resetAndStart(){ startGame(); }
+
+  // ---------- INPUT ----------
+  function tryJump(){
+    if (!running || paused || gameOver) return;
+    if (snow.onGround) { snow.vy = JUMP_V; snow.onGround = false; }
+  }
+
+  canvas.addEventListener("pointerdown",(ev)=>{
+    const r = canvas.getBoundingClientRect();
+    const x = (ev.clientX - r.left) / (r.width / BASE_W);
+    const y = (ev.clientY - r.top)  / (r.height/ BASE_H);
+
+    if (waitingStart){
+      for (const k of ["Easy","Medium","Hard"]){
+        const z = homeZones[k]; if (z && x>z.x&&x<z.x+z.w&&y>z.y&&y<z.y+z.h){ setDifficulty(k); render(); return; }
+      }
+      const s = homeZones.start;
+      if (s && x>s.x&&x<s.x+s.w&&y>s.y&&y<s.y+s.h){ startGame(); return; }
+      return;
+    }
+
+    if (gameOver){
+      for (const k of ["Easy","Medium","Hard"]){
+        const z = overlayZones[k];
+        if (z && x>z.x&&x<z.x+z.w&&y>z.y&&y<z.y+z.h){
+          setDifficulty(k);
+          render();          // <-- re-render whole frame (no extra dim)
+          return;
+        }
+      }
+      const b = overlayZones.replay;
+      if (b && x>b.x&&x<b.x+b.w&&y>b.y&&y<b.y+b.h){ resetAndStart(); return; }
+      return;
+    }
+
+    tryJump();
+  }, {passive:true});
+
+  window.addEventListener("keydown",(e)=>{
+    const k = e.key;
+    if (k===" " || k==="ArrowUp"){
+      e.preventDefault();
+      if (waitingStart) startGame();
+      else if (gameOver) resetAndStart();
+      else tryJump();
+    }
+    if (k.toLowerCase()==="p" && !gameOver && !waitingStart){
+      paused = !paused; if (!paused){ last=performance.now(); loop(); } else render();
+    }
+  });
+
+  // initial render
+  render();
+}; // end boot
+
+if (document.readyState !== 'loading') boot();
+else document.addEventListener('DOMContentLoaded', boot);
+</script>
